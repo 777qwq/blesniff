@@ -1,6 +1,6 @@
 Package: com.777qwq.blesniff
 Name: BLESniff
-Version: 0.2.1
+Version: 0.2.2
 Architecture: iphoneos-arm64
 Description: Universal BLE protocol probe - logs all CoreBluetooth traffic of apps.
 Depends: mobilesubstrate

@@ -1,6 +1,8 @@
 #import <CoreBluetooth/CoreBluetooth.h>
 #import <Foundation/Foundation.h>
 #include <substrate.h>
+#include <dlfcn.h>
+#include <mach-o/dyld.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -293,47 +295,71 @@ static void bs_swz_peripheral_delegate(id delegate) {
     bs_swz_once(cls, @selector(peripheral:didWriteValueForCharacteristic:error:), (IMP)bs_h_writeack, (IMP *)&bs_old_writeack);
 }
 
-// ── hooks ────────────────────────────────────────────────
+// ── hooks (manual MSHookMessageEx, logos-free init control) ─────
 
-%hook CBCentralManager
-- (void)scanForPeripheralsWithServices:(NSArray<CBUUID *> *)serviceUUIDs
-                               options:(NSDictionary<NSString *, id> *)options {
+static void (*bs_old_scan)(id, SEL, NSArray *, NSDictionary *);
+static void bs_h_scan(id self, SEL _cmd, NSArray *svcs, NSDictionary *opts) {
     NSMutableString *m = [NSMutableString stringWithString:@"filter="];
-    if (serviceUUIDs.count == 0) [m appendString:@"ALL"];
-    else for (CBUUID *u in serviceUUIDs) [m appendFormat:@"%@ ", u.UUIDString];
+    if (svcs.count == 0) [m appendString:@"ALL"];
+    else for (CBUUID *u in svcs) [m appendFormat:@"%@ ", u.UUIDString];
     bs_log("SCAN", nil, nil, m.UTF8String, nil);
-    %orig;
+    if (bs_old_scan) bs_old_scan(self, _cmd, svcs, opts);
 }
 
-- (void)setDelegate:(id<CBCentralManagerDelegate>)delegate {
-    %orig;
-    bs_swz_central_delegate(delegate);
-}
-%end
-
-%hook CBPeripheral
-- (void)writeValue:(NSData *)data
- forCharacteristic:(CBCharacteristic *)characteristic
-              type:(CBCharacteristicWriteType)type {
+static void (*bs_old_pwrite)(id, SEL, NSData *, CBCharacteristic *, long);
+static void bs_h_pwrite(id self, SEL _cmd, NSData *data, CBCharacteristic *ch, long type) {
     char buf[128];
-    snprintf(buf, sizeof(buf), "type=%ld", (long)type);
-    bs_log("WRITE", characteristic.service.UUID.UUIDString, characteristic.UUID.UUIDString, buf, data);
-    bs_mark_write(characteristic, data);
-    %orig;
+    snprintf(buf, sizeof(buf), "type=%ld", type);
+    bs_log("WRITE", ch.service.UUID.UUIDString, ch.UUID.UUIDString, buf, data);
+    bs_mark_write(ch, data);
+    if (bs_old_pwrite) bs_old_pwrite(self, _cmd, data, ch, type);
 }
 
-- (void)setNotifyValue:(BOOL)enabled forCharacteristic:(CBCharacteristic *)characteristic {
+static void (*bs_old_notify)(id, SEL, BOOL, CBCharacteristic *);
+static void bs_h_notify(id self, SEL _cmd, BOOL enabled, CBCharacteristic *ch) {
     char buf[128];
     snprintf(buf, sizeof(buf), "notify=%d", enabled ? 1 : 0);
-    bs_log("NOTIFY", characteristic.service.UUID.UUIDString, characteristic.UUID.UUIDString, buf, nil);
-    %orig;
+    bs_log("NOTIFY", ch.service.UUID.UUIDString, ch.UUID.UUIDString, buf, nil);
+    if (bs_old_notify) bs_old_notify(self, _cmd, enabled, ch);
 }
 
-- (void)setDelegate:(id<CBPeripheralDelegate>)delegate {
-    %orig;
+static void (*bs_old_csetdel)(id, SEL, id);
+static void bs_h_csetdel(id self, SEL _cmd, id delegate) {
+    if (bs_old_csetdel) bs_old_csetdel(self, _cmd, delegate);
+    bs_swz_central_delegate(delegate);
+}
+
+static void (*bs_old_psetdel)(id, SEL, id);
+static void bs_h_psetdel(id self, SEL _cmd, id delegate) {
+    if (bs_old_psetdel) bs_old_psetdel(self, _cmd, delegate);
     bs_swz_peripheral_delegate(delegate);
 }
-%end
+
+static void bs_install_class_hooks(void) {
+    Class ccm = objc_getClass("CBCentralManager");
+    Class cbp = objc_getClass("CBPeripheral");
+    if (!ccm || !cbp) return;
+    MSHookMessageEx(ccm, @selector(scanForPeripheralsWithServices:options:), (IMP)bs_h_scan, (IMP *)&bs_old_scan);
+    MSHookMessageEx(ccm, @selector(setDelegate:), (IMP)bs_h_csetdel, (IMP *)&bs_old_csetdel);
+    MSHookMessageEx(cbp, @selector(writeValue:forCharacteristic:type:), (IMP)bs_h_pwrite, (IMP *)&bs_old_pwrite);
+    MSHookMessageEx(cbp, @selector(setNotifyValue:forCharacteristic:), (IMP)bs_h_notify, (IMP *)&bs_old_notify);
+    MSHookMessageEx(cbp, @selector(setDelegate:), (IMP)bs_h_psetdel, (IMP *)&bs_old_psetdel);
+}
+
+// dyld add_image callback: fires when CoreBluetooth gets loaded (lazy-load apps)
+static void bs_cbimage_cb(const struct mach_header *mh, intptr_t slide) {
+    Dl_info info;
+    if (!dladdr((const void *)mh, &info) || !info.dli_fname) return;
+    if (!strstr(info.dli_fname, "CoreBluetooth")) return;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        if (!objc_getClass("CBCentralManager")) return;
+        bs_install_class_hooks();
+        char buf[128];
+        snprintf(buf, sizeof(buf), "dir=%s (late hook)", bs_logpath);
+        bs_log("LOADED_LATE", nil, nil, buf, nil);
+    });
+}
 
 %ctor {
     // resolve writable log path: shared dir first, app container fallback
@@ -345,10 +371,17 @@ static void bs_swz_peripheral_delegate(id delegate) {
         NSString *home = NSHomeDirectory();
         snprintf(bs_logpath, sizeof(bs_logpath), "%s/Documents/blesniff.log", home.UTF8String);
     }
-    // CoreBluetooth absent in this process: bail silently (avoid daemon log spam)
-    if (!objc_getClass("CBCentralManager")) return;
-    %init;
-    char buf[160];
-    snprintf(buf, sizeof(buf), "dir=%s", bs_logpath);
-    bs_log("LOADED", nil, nil, buf, nil);
+    if (objc_getClass("CBCentralManager")) {
+        bs_install_class_hooks();
+        char buf[160];
+        snprintf(buf, sizeof(buf), "dir=%s cb=1", bs_logpath);
+        bs_log("LOADED", nil, nil, buf, nil);
+    } else {
+        // CoreBluetooth not loaded yet (lazy-load app): hook via dyld add_image
+        // event instead of polling. Callback fires for already-loaded images too.
+        _dyld_register_func_for_add_image(bs_cbimage_cb);
+        char buf[160];
+        snprintf(buf, sizeof(buf), "dir=%s cb=0 awaiting", bs_logpath);
+        bs_log("LOADED", nil, nil, buf, nil);
+    }
 }
