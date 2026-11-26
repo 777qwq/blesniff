@@ -57,7 +57,7 @@ static void bs_log_line(const char *event, NSString *svc, NSString *chr,
     pthread_mutex_unlock(&bs_mutex);
 }
 
-static void bs_log_svc_list(NSString *event, NSArray<CBService *> *svcs) {
+static void bs_log_svc_list(const char *event, NSArray<CBService *> *svcs) {
     NSMutableString *m = [NSMutableString stringWithString:@""];
     for (CBService *s in svcs) [m appendFormat:@"%@ ", s.UUID.UUIDString];
     char buf[512];
@@ -87,7 +87,7 @@ static NSString *bs_host() {
 static void bs_log(const char *event, NSString *svc, NSString *chr,
                    const char *extra, NSData *data) {
     char line[128];
-    snprintf(line, sizeof(line), "host=%s", bs_host.UTF8String);
+    snprintf(line, sizeof(line), "host=%s", bs_host().UTF8String);
     pthread_mutex_lock(&bs_mutex);
     FILE *f = fopen(BS_DIR "/log", "a");
     if (f) {
@@ -111,7 +111,6 @@ static void bs_log(const char *event, NSString *svc, NSString *chr,
 
 static NSMutableDictionary *bs_anlz;  // key=svc/chr → @{rule, last}
 static NSDate *bs_respUntil;          // 写后响应窗口
-static NSString *bs_respTrigger;      // 触发写入的 hex 前缀
 
 static NSString *bs_anlz_key(CBCharacteristic *ch) {
     return [NSString stringWithFormat:@"%@/%@", ch.service.UUID.UUIDString, ch.UUID.UUIDString];
@@ -198,7 +197,6 @@ static void bs_mark_write(CBCharacteristic *ch, NSData *data) {
     NSMutableDictionary *st = bs_anlz[key];
     if (st && st[@"last"]) st[@"baseline"] = st[@"last"];
     bs_respUntil = [NSDate dateWithTimeIntervalSinceNow:1.5];
-    bs_respTrigger = data;
     pthread_mutex_unlock(&bs_mutex);
 }
 
