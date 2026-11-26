@@ -20,6 +20,7 @@ jobs:
       - name: Build package
         run: |
           export THEOS=$HOME/theos
+          export THEOS_PACKAGE_SCHEME=rootless
           make package FINALPACKAGE=1
 
       - name: Copy to releases
