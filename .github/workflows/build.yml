@@ -1,0 +1,34 @@
+name: Build
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Theos
+        run: |
+          git clone --depth=1 https://github.com/theos/theos.git ~/theos
+          curl -sL https://github.com/theos/sdks/archive/refs/heads/master.zip -o sdks.zip
+          unzip -q sdks.zip -d ~/theos/sdks_tmp
+          mv ~/theos/sdks_tmp/sdks-master/* ~/theos/sdks/
+          rm -rf sdks.zip ~/theos/sdks_tmp
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+
+      - name: Build package
+        run: |
+          export THEOS=$HOME/theos
+          make package FINALPACKAGE=1
+
+      - name: Copy to releases
+        run: |
+          mkdir -p releases
+          cp packages/*.deb releases/
+          ls -l releases/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: debs
+          path: releases/
