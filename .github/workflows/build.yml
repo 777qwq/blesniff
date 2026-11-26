@@ -9,8 +9,7 @@ jobs:
 
       - name: Setup Theos
         run: |
-          git clone --depth=1 https://github.com/theos/theos.git ~/theos
-          git clone --depth=1 https://github.com/theos/dm.pl.git ~/theos/vendor/dm.pl
+          git clone --recursive --depth=1 https://github.com/theos/theos.git ~/theos
           curl -sL https://github.com/theos/sdks/archive/refs/heads/master.zip -o sdks.zip
           unzip -q sdks.zip -d ~/theos/sdks_tmp
           mv ~/theos/sdks_tmp/sdks-master/* ~/theos/sdks/
